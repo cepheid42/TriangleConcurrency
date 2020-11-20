@@ -1,19 +1,49 @@
 /*
     MST.java
+
     Euclidean minimum spanning tree implementation.
+
     Uses Dwyer's algorithm for Delaunay triangularization, then
-    Kruskal's MST algorithm on the resulting mesh.  You need parallelize
-    both stages.  For the triangulation stage, I recommend creating a
-    new thread class similar to worker, to use in the divide-and-conquer
-    step of triangulate().  For the tree state, I recommend letting worker
-    threads find subtrees to merge in parallel, but forcing them to
-    finalize the merges in order (after double-checking to make sure
-    their subtrees haven't been changed by earlier finalizations).
+    Kruskal's MST algorithm on the resulting mesh.  You need to
+    parallelize both stages.  For the triangulation stage, I recommend
+    creating a new thread class similar to worker, to use in the
+    divide-and-conquer step of triangulate().  For the tree state, I
+    recommend letting worker threads find subtrees to merge in parallel,
+    but forcing them to finalize the merges in order (after
+    double-checking to make sure their subtrees haven't been changed by
+    earlier finalizations).
+
     There are better ways to parallelize each of these steps, but
     they're quite a bit harder.
-    Michael L. Scott, November 2015; based heavily on earlier
-    incarnations of several programming projects, and on Delaunay mesh
-    code written in 2007.
+
+     Accepts the following command-line arguments:
+
+    −a  [0123]
+        Animation mode.
+        0   (default) =>
+            print run time to standard output, but nothing else
+        1 =>
+            print list of created, destroyed, and selected (tree) edges,
+            plus run time
+        2 =>
+            create a GUI that shows the triangulation and MST, and allow
+            the user to re-run with additional sets of points
+        3 =>
+            animate the algorithm on the screen as it runs.
+    −n  num
+        Number of points.  Default = 50.  More than a couple hundred becomes
+        too dense to look good when animated.  You’ll need to run big numbers
+        (more than 10,000) to get multi-second execution times.
+    −s  num
+        Seed for pseudorandom number generator.  Every value of the seed
+        produces a different set of points.
+    −t  num
+        Number of threads (max) that should be running at any given time.
+        This argument is currently unused; it’s it’s here to support your
+        parallelization efforts.
+
+    Michael L. Scott, Nov. 2020; based heavily on earlier incarnations of
+    several programming projects, and on Delaunay mesh code written in 2007.
  */
 
 import java.awt.*;
@@ -28,7 +58,6 @@ public class MST {
     private static int n = 50;              // default number of points
     private static long sd = 0;             // default random number seed
     private static int numThreads = 1;      // default
-    public int threads_running = 0;
 
     private static final int TIMING_ONLY    = 0;
     private static final int PRINT_EVENTS   = 1;
@@ -36,7 +65,8 @@ public class MST {
     private static final int FULL_ANIMATION = 3;
     private static int animate = TIMING_ONLY;       // default
 
-    // Examine command-line arguments for alternative running modes.
+    public int threads_running = 0;
+    // Process command-line arguments.
     //
     private static void parseArgs(String[] args) {
         for (int i = 0; i < args.length; i++) {
@@ -48,25 +78,18 @@ public class MST {
                     try {
                         an = Integer.parseInt(args[i]);
                     } catch (NumberFormatException e) { }
-                    if (an >= TIMING_ONLY && an <= FULL_ANIMATION) {
-                        animate = an;
-                    } else {
-                        System.err.printf("Invalid animation level: %s\n", args[i]);
-                    }
+                    if (an >= TIMING_ONLY && an <= FULL_ANIMATION) animate = an;
+                    else System.err.printf("Invalid animation level: %s\n", args[i]);
                 }
             } else if (args[i].equals("-n")) {
-                if (++i >= args.length) {
-                    System.err.print("Missing number of points\n");
-                } else {
+                if (++i >= args.length) System.err.print("Missing number of points\n");
+                else {
                     int np = -1;
                     try {
                         np = Integer.parseInt(args[i]);
                     } catch (NumberFormatException e) { }
-                    if (np > 0) {
-                        n = np;
-                    } else {
-                        System.err.printf("Invalid number of points: %s\n", args[i]);
-                    }
+                    if (np > 0) n = np;
+                    else System.err.printf("Invalid number of points: %s\n", args[i]);
                 }
             } else if (args[i].equals("-s")) {
                 if (++i >= args.length) {
@@ -86,11 +109,8 @@ public class MST {
                     try {
                         nt = Integer.parseInt(args[i]);
                     } catch (NumberFormatException e) { }
-                    if (nt > 0) {
-                        numThreads = nt;
-                    } else {
-                        System.err.printf("Invalid number of threads: %s\n", args[i]);
-                    }
+                    if (nt > 0) numThreads = nt;
+                    else System.err.printf("Invalid number of threads: %s\n", args[i]);
                 }
             } else {
                 System.err.printf("Unexpected argument: %s\n", args[i]);
@@ -98,44 +118,44 @@ public class MST {
         }
     }
 
-    // Initialize appropriate program components for specified animation mode.
+    // Initialize program components for specified animation mode.
     //
-    private Surface build(RootPaneContainer pane, int an) {
+    private MSTworld build(RootPaneContainer pane, int an) {
         final Coordinator c = new Coordinator();
-        Surface s = new Surface(n, sd, c, numThreads); // numThreads added as argument
+        MSTworld w = new MSTworld(n, sd, c);
         Animation t = null;
         if (an == SHOW_RESULT || an == FULL_ANIMATION) {
-            t = new Animation(s);
-            new UI(c, s, t, sd, pane);
+            t = new Animation(w);
+            new UI(c, w, t, sd, pane);
         }
         final Animation a = t;
         if (an == PRINT_EVENTS) {
-            s.setHooks(
-                    new Surface.EdgeRoutine() {
+            w.setHooks(
+                    new MSTworld.EdgeRoutine() {
                         public void run(int x1, int y1, int x2, int y2, boolean dum) {
                             System.out.printf("created   %12d %12d %12d %12d\n",
                                     x1, y1, x2, y2);
                         }},
-                    new Surface.EdgeRoutine() {
+                    new MSTworld.EdgeRoutine() {
                         public void run(int x1, int y1, int x2, int y2, boolean dum) {
                             System.out.printf("destroyed %12d %12d %12d %12d\n",
                                     x1, y1, x2, y2);
                         }},
-                    new Surface.EdgeRoutine() {
+                    new MSTworld.EdgeRoutine() {
                         public void run(int x1, int y1, int x2, int y2, boolean dum) {
                             System.out.printf("selected  %12d %12d %12d %12d\n",
                                     x1, y1, x2, y2);
                         }});
         } else if (an == FULL_ANIMATION) {
-            Surface.EdgeRoutine er = new Surface.EdgeRoutine() {
+            MSTworld.EdgeRoutine er = new MSTworld.EdgeRoutine() {
                 public void run(int x1, int y1, int x2, int y2, boolean dum)
                         throws Coordinator.KilledException {
                     c.hesitate();
                     a.repaint();        // graphics need to be re-rendered
                 }};
-            s.setHooks(er, er, er);
+            w.setHooks(er, er, er);
         }
-        return s;
+        return w;
     }
 
     public static void main(String[] args) {
@@ -152,8 +172,7 @@ public class MST {
         } else {
             System.out.printf("%d points, seed %d\n", n, sd);
         }
-        Surface s = me.build(f, animate);
-        s.numThreads = numThreads;
+        MSTworld w = me.build(f, animate);
         if (f != null) {
             f.pack();
             f.setVisible(true);
@@ -163,9 +182,9 @@ public class MST {
             long startTime = new Date().getTime();
             long midTime = 0;
             try {
-                s.DwyerSolve();
+                w.DwyerSolve();
                 midTime = new Date().getTime();
-                s.KruskalSolve();
+                w.KruskalSolve();
             } catch(Coordinator.KilledException e) { }
             long endTime = new Date().getTime();
             System.out.printf("elapsed time: %.3f + %.3f = %.3f seconds\n",
@@ -176,35 +195,42 @@ public class MST {
     }
 }
 
-// The Worker is the thread that does the actual work of finding a
-// triangulation and MST (in the animated version -- main thread does it
-// in the terminal I/O version).
+// The Worker is the thread that actually helps find a triangulation and MST
+// (in the animated version -- main thread does it in the terminal I/O version).
 //
 class Worker extends Thread {
-    private final Surface s;
+    private final MSTworld w;
     private final Coordinator c;
     private final UI u;
     private final Animation a;
 
+    // Constructor
+    //
+    public Worker(MSTworld W, Coordinator C, UI U, Animation A) {
+        w = W;
+        c = C;
+        u = U;
+        a = A;
+    }
+
     // The run() method of a Java Thread is never invoked directly by
-    // user code.  Rather, it is called by the Java runtime when user
-    // code calls start().
+    // the user: it is called by the Java runtime when user code calls start().
     //
     // The run() method of a worker thread *must* begin by calling
-    // c.register() and end by calling c.unregister().  These allow the
+    // c.register() and end by calling c.unRegister().  These allow the
     // user interface (via the Coordinator) to pause and terminate
     // workers.  Note how the worker is set up to catch KilledException.
     // In the process of unwinding back to here we'll cleanly and
     // automatically release any monitor locks.  If you create new kinds
     // of workers (as part of a parallel solver), make sure they call
-    // c.register() and c.unregister() properly.
+    // c.register() and c.unRegister() properly.
     //
     public void run() {
         try {
             c.register();
-            s.DwyerSolve();
-            s.KruskalSolve();
-            c.unregister();
+            w.DwyerSolve();
+            w.KruskalSolve();
+            c.unRegister();
         } catch(Coordinator.KilledException e) { }
         if (a != null) {
             // Tell the graphics event thread to unset the default
@@ -219,41 +245,29 @@ class Worker extends Thread {
             });
         }
     }
-
-    // Constructor
-    //
-    public Worker(Surface S, Coordinator C, UI U, Animation A) {
-        s = S;
-        c = C;
-        u = U;
-        a = A;
-    }
 }
 
-// The Surface is the MST world, containing all the points and edges.
+// The MSTworld contains all points and edges.
 //
-class Surface {
-    // Much of the logic in Dwyer's algorithm is parameterized by
-    // directional (X or Y) and rotational (clockwise, counterclockwise)
-    // orientation.  The following constants get plugged into the
-    // parameter slots.
-    private static final int xdim = 0;
-    private static final int ydim = 1;
+class MSTworld {
+    // Much of Dwyer's algorithm is parameterized by directional (X or Y)
+    // and rotational (clockwise, counterclockwise) orientation.
+    // The following constants get plugged into the parameter slots.
     private static final int ccw = 0;
     private static final int cw = 1;
-    public int threads_running=0;
-    public static int numThreads;
+    private static final int xdim = 0;
+    private static final int ydim = 1;
 
     private int minx;   // smallest x value among all points
-    private int miny;   // smallest y value among all points
     private int maxx;   // largest x value among all points
+    private int miny;   // smallest y value among all points
     private int maxy;   // largest y value among all points
     public int getMinx() {return minx;}
-    public int getMiny() {return miny;}
     public int getMaxx() {return maxx;}
+    public int getMiny() {return miny;}
     public int getMaxy() {return maxy;}
 
-    // The following 7 fields are set by the Surface constructor.
+    // The following 7 fields are set by the MSTworld constructor.
     private final Coordinator coord;
     // Not needed at present, but will need to be passed to any
     // newly created workers.
@@ -265,15 +279,25 @@ class Surface {
     // each other.  See point.hashCode and point.equals below.
     private final SortedSet<edge> edges;
     // Used for rendering.  Ordering supports the KruskalSolve stage.
-
-    /// newly added threads_cnt
-    private static int threads_cnt = 0;
-
-    /// newly added hashtable
-    private Hashtable<edge, Boolean>hashEdgeToNotCycle = new Hashtable<edge, Boolean>();
-
     private long sd = 0;
     private final Random prn;     // pseudo-random number generator
+    private static int thread_count = 0;
+    // Constructor
+    //
+    public MSTworld(int N, long SD, Coordinator C) {
+        n = N;
+        sd = SD;
+        coord = C;
+
+        points = new point[n];
+        edges = new ConcurrentSkipListSet<edge>(new edgeComp());
+        // Supports safe concurrent access by worker and graphics threads,
+        // and as a SortedSet it keeps the edges in order by length.
+        pointHash = new HashSet<point>(n);
+
+        prn = new Random();
+        reset();
+    }
 
     // 3x3 determinant.  Called by 4x4 determinant.
     //
@@ -305,10 +329,9 @@ class Surface {
         points[j] = t;
     }
 
-    // A point is a mesh/tree vertex.
-    // It also serves, in the Kruskal stage, as a union-find set.
-    // Its x and y coordinates are private and final.
-    // Use the getCoord method to read their values.
+    // A point is a mesh/tree vertex.  It also serves, in the Kruskal
+    // stage, as a union-find set.  Its x and y coordinates are private
+    // and final.  Use the getCoord method to read their values.
     //
     private class point {
         private final int coordinates[] = new int[2];
@@ -317,6 +340,13 @@ class Surface {
         // The following two fields are needed in the Kruskal stage (only).
         private point representative = null;    // equivalence set (subtree)
         private int subtreeSize = 1;
+
+        // Constructor
+        //
+        public point(int x, int y) {
+            coordinates[xdim] = x;  coordinates[ydim] = y;
+            // firstEdge == null
+        }
 
         // This is essentially the "find" of a union-find implementation.
         public point subtree() {
@@ -342,9 +372,9 @@ class Surface {
             return coordinates[dim];
         }
 
-        // Override Object.hashCode and Object.equals.
-        // This way two points are equal (and hash to the same slot in
-        // HashSet pointHash) if they have the same coordinates, even if they
+        // Override Object.hashCode and Object.equals.  This way two
+        // points are equal (and hash to the same slot in HashSet
+        // pointHash) if they have the same coordinates, even if they
         // are different objects.
         //
         public int hashCode() {
@@ -355,24 +385,17 @@ class Surface {
             return p.coordinates[xdim] == coordinates[xdim]
                     && p.coordinates[ydim] == coordinates[ydim];
         }
-
-        // Constructor
-        //
-        public point(int x, int y) {
-            coordinates[xdim] = x;  coordinates[ydim] = y;
-            // firstEdge == null
-        }
     }
 
     // Signatures for things someone might want us to do with a point or
     // an edge (e.g., display it).
     //
+    public interface PointRoutine{
+        public void run(int x, int y);
+    }
     public interface EdgeRoutine {
         public void run(int x1, int y1, int x2, int y2, boolean treeEdge)
                 throws Coordinator.KilledException;
-    }
-    public interface PointRoutine{
-        public void run(int x, int y);
     }
 
     public void forAllPoints(PointRoutine pr) {
@@ -393,13 +416,13 @@ class Surface {
 
     // Routines to call when performing the specified operations:
     private static EdgeRoutine edgeCreateHook = null;
-    private static EdgeRoutine edgeDestroyHook = null;
     private static EdgeRoutine edgeSelectHook = null;
+    private static EdgeRoutine edgeDestroyHook = null;
 
     // The following is separate from the constructor to avoid a
     // circularity problem: when working in FULL_ANIMATION mode, the
-    // Animation object needs a reference to the Surface object, and the
-    // Surface object needs references to the hooks of the Animation object.
+    // Animation object needs a reference to the MSTworld object, and the
+    // MSTworld object needs references to the hooks of the Animation object.
     //
     public void setHooks(EdgeRoutine ech, EdgeRoutine edh, EdgeRoutine esh) {
         edgeCreateHook = ech;
@@ -416,8 +439,8 @@ class Surface {
         public final edge[][] neighbors = new edge[2][2];
         // indexed first by edge end and then by rotational direction
         private boolean isMSTedge = false;
-        public boolean notCycleEdge = true; //check cycle edge
         public final double length;
+        public boolean notEdge = true;
 
         // Return index of point p within edge
         //
@@ -427,7 +450,7 @@ class Surface {
             return -1;      // so I get an error if I use it
         }
 
-        // utility routine for Constructor
+        // utility routine for constructor
         //
         private void initializeEnd(point p, edge e, int end, int dir) {
             if (e == null) {
@@ -486,9 +509,8 @@ class Surface {
                         points[1].getCoord(ydim), false);
         }
 
-        // Assume edges are unique.
-        // Override Object.equals to make it consistent with
-        // edgeComp.compare below.
+        // Assume edges are unique.  Override Object.equals to make it
+        // consistent with edgeComp.compare below.
         //
         public boolean equals(Object o) {
             return this == o;
@@ -508,8 +530,8 @@ class Surface {
 
     // To support ordered set of edges.  Return 0 _only_ if two
     // arguments are the _same_ edge (this is necessary for unique
-    // membership in set).  Otherwise order based on length.  If lengths
-    // are the same, order by coordinates.
+    // membership in set).  Otherwise order based on length.
+    // If lengths are the same, order by coordinates.
     //
     public static class edgeComp implements Comparator<edge> {
         public int compare(edge e1, edge e2) {
@@ -553,10 +575,8 @@ class Surface {
     //
     public void reset() {
         prn.setSeed(sd);
-        minx = Integer.MAX_VALUE;
-        miny = Integer.MAX_VALUE;
-        maxx = Integer.MIN_VALUE;
-        maxy = Integer.MIN_VALUE;
+        minx = Integer.MAX_VALUE;   miny = Integer.MAX_VALUE;
+        maxx = Integer.MIN_VALUE;   maxy = Integer.MIN_VALUE;
         pointHash.clear();      // empty out the set of points
         for (int i = 0; i < n; i++) {
             point p;
@@ -611,50 +631,19 @@ class Surface {
         int x2 = p2.getCoord(xdim);     int y2 = p2.getCoord(ydim);
         int x3 = p3.getCoord(xdim);     int y3 = p3.getCoord(ydim);
 
-        if (x1 == x2) {                     // first segment vertical
-            if (y1 > y2) {                  // points down
-                return (x3 >= x2);
-            } else {                        // points up
-                return (x3 <= x2);
-            }
+        if (x1 == x2) {                         // first segment vertical
+            if (y1 > y2) return (x3 >= x2);     // points down
+            else return (x3 <= x2);             // points up
         } else {
             double m = (((double) y2) - y1) / (((double) x2) - x1);
             // slope of first segment
-            if (x1 > x2) {      // points left
+            if (x1 > x2) {                      // points left
                 return (y3 <= m * (((double) x3) - x1) + y1);
                 // p3 below line
-            } else {            // points right
+            } else {                            // points right
                 return (y3 >= m * (((double) x3) - x1) + y1);
                 // p3 above line
             }
-        }
-    }
-
-    class TriHelperThread extends Thread {
-        private final int l;
-        private final int r;
-        private final int low0;
-        private final int high0;
-        private final int low1;
-        private final int high1;
-        private final int parity;
-
-        public void run() {
-            try {
-                triangulate(l, r, low0, high0, low1, high1, parity);
-            } catch(Coordinator.KilledException e) { }
-        }
-
-        // Constructor
-        public TriHelperThread(int l, int r, int low0, int high0, int low1, int high1, int parity) {
-            this.l = l;
-            this.r = r;
-            this.low0 = low0;
-            this.low1 = low1;
-            this.high0 = high0;
-            this.high1 = high1;
-            this.parity = parity;
-            threads_running++;
         }
     }
 
@@ -666,25 +655,48 @@ class Surface {
     // As suggested by Dwyer, we swap axes and rotational directions
     // at successive levels of recursion, to minimize the number of long
     // edges that are likely to be broken when stitching.
-    //
-    private void triangulate(int l, int r, int low0, int high0,
-                             int low1, int high1, int parity)
-            throws Coordinator.KilledException {
 
+    class Helper extends Thread {
+        private int l;
+        private int r;
+        private int l0;
+        private int l1;
+        private int h0;
+        private int h1;
+        private int p;
+
+        public void run() {
+            try {
+                triangulate(l, r, l0, h0, l1, h1, p);
+            } catch (Coordinator.KilledException e) {
+                // Nothing to do here I guess
+            }
+        }
+
+        public Helper(int l, int r, int l0, int h0, int l1, int h1, int p) {
+            this.l = l;
+            this.r = r;
+            this.l0 = l0;
+            this.l1 = l1;
+            this.h0 = h0;
+            this.h1 = h1;
+            this.p = p;
+            threads_running++;
+        }
+    }
+    private void triangulate(int l, int r, int low0, int high0, int low1, int high1, int parity) throws Coordinator.KilledException {
         final int dim0;  final int dim1;
         final int dir0;  final int dir1;
 
         if (parity == 0) {
-            dim0 = xdim;  dim1 = ydim;
             dir0 = ccw;   dir1 = cw;
+            dim0 = xdim;  dim1 = ydim;
         } else {
-            dim0 = ydim;  dim1 = xdim;
             dir0 = cw;    dir1 = ccw;
+            dim0 = ydim;  dim1 = xdim;
         }
 
-        if (l == r) {
-            return;
-        }
+        if (l == r) return;
         if (l == r-1) {
             new edge(points[l], points[r], null, null, dir1);
             // direction doesn't matter in this case
@@ -777,6 +789,7 @@ class Surface {
         }
         // Now [l..i] is the left partition and [j..r] is the right.
         // Either may be empty.
+
         if (i < l) {
             // empty left half
             triangulate(j, r, low1, high1, mid, high0, 1-parity);
@@ -785,38 +798,23 @@ class Surface {
             triangulate(l, i, low1, high1, low0, mid, 1-parity);
         } else {
             // divide and conquer
-            // triangulate(l, i, low1, high1, low0, mid, 1-parity);
-            // triangulate(j, r, low1, high1, mid, high0, 1-parity);
-            TriHelperThread lt = null;
-            // TriHelperThread rt = null;
+            Helper thd = null;
 
-            if(threads_running < numThreads){
-                lt = new TriHelperThread(l, i, low1, high1, low0, mid, 1-parity);
-                //rt = new TriHelperThread(j, r, low1, high1, mid, high0, 1-parity);
-                lt.start();
+            if (threads_running < nThreads) {
+                thd = new Helper(l, i, low1, high1, low0, mid, 1 - parity);
+                thd.start();
+                triangulate(j, r, low1, high1, mid, high0, 1 - parity);
+            } else {
                 triangulate(j, r, low1, high1, mid, high0, 1-parity);
-                //rt.start();
-            }
-            else{
                 triangulate(l, i, low1, high1, low0, mid, 1-parity);
-                triangulate(j, r, low1, high1, mid, high0, 1-parity);
             }
 
-            if(lt!=null){
-                try{
-                    lt.join();
+            if (thd != null) {
+                try {
+                    thd.join();
                     threads_running--;
-                }
-                catch (InterruptedException e){
-                }
+                } catch (InterruptedException e) {}
             }
-            // if(rt!=null){
-            //     try{
-            //         rt.join();
-            //     }
-            //     catch (Exception e ){
-            //     }
-            // }
 
             // prepare to stitch meshes together up the middle:
             class side {
@@ -828,15 +826,16 @@ class Surface {
                 public int ai;      // index of p within a
                 public int bi;      // index of p within b
             };
-            side left = new side();
             side right = new side();
-            left.p = lp;
+            side left = new side();
             right.p = rp;
+            left.p = lp;
 
             // Rotate around extreme point to find edges adjacent to Y
             // axis.  This class is basically a hack to get around the
             // lack of nested subroutines in Java.  We invoke its run
             // method twice below.
+            //
             class rotateClass {
                 void run(side s, int dir) {
                     // rotate around s.p to find edges adjacent to Y axis
@@ -866,12 +865,13 @@ class Surface {
                 }
             }
             rotateClass rotate = new rotateClass();
-            rotate.run(left, dir1);
             rotate.run(right, dir0);
+            rotate.run(left, dir1);
 
             // Find endpoint of bottom edge of seam, by moving around border
             // as far as possible without going around a corner.  This, too,
             // is basically a nested subroutine.
+            //
             class findBottomClass {
                 boolean move(side s, int dir, point o) {
                     boolean progress = false;
@@ -909,8 +909,11 @@ class Surface {
             // Work up the seam creating new edges and deleting old
             // edges where necessary.  Note that {left,right}.{b,bi,bp}
             // are no longer needed.
+
             while (true) {
+
                 // Find candidate endpoint.  Yet another nested subroutine.
+                //
                 class findCandidateClass {
                     point call(side s, int dir, edge base, point o)
                             throws Coordinator.KilledException {
@@ -979,63 +982,43 @@ class Surface {
         }
     }
 
-    // returns the size of the edge set computed by the delauny triangulation subroutine
-    public int getSize(){
-        return edges.size();
-    }
-
     // This is the actual MST calculation.
     // It relies on the fact that set "edges" is sorted by length, so
     // enumeration occurs shortest-to-longest.
     //
-/*    public void KruskalSolve()
-        throws Coordinator.KilledException {
-        int numTrees = n;
-        for (edge e : edges) {
-            point st1 = e.points[0].subtree();
-            point st2 = e.points[1].subtree();
-            if (st1 != st2) {
-                // This edge joins two previously separate subtrees.
-                st1.merge(st2);
-                e.addToMST();
-                if (--numTrees == 1) break;
-            }
-        }
-    }
-*/
-// MST helper thread
-    class MSTHelperThread extends Thread {
+    public int threads_running = 0;
+    public static int nThreads;
+
+    class MSTHelper extends Thread {
         private SortedSet<edge> edges;
-        private int i;
-        private int thread_number;
+        int i;
+        int tid;
 
-        // constructor
-        public MSTHelperThread(SortedSet<edge> edges, int i, int thread_number){
-            this.edges = edges;
+        public MSTHelper(SortedSet<edge> es, int i, int tid) {
+            this.edges = es;
             this.i = i;
-            this.thread_number = thread_number;
+            this.tid = tid;
         }
 
-        // run
         public void run(){
-            int m = getSize(); // numEdges
-            int leftI = 0; // each partition starting index
-            if(m%thread_number == 0){
-                leftI = i*m/thread_number;
-            }
-            else{
-                leftI = i*(m-m%thread_number)/thread_number;
+            int nedges = edges.size();
+            int li = 0;
+            int rm = nedges % tid;
+
+            if (rm == 0) {
+                li = i * (nedges / tid);
+            } else {
+                li = i * ((nedges - rm) / tid);
             }
 
-            while( eIndex < leftI && isFinished ){
-                // System.out.println("eIndex in run method for each partition " + eIndex);
-                for(edge e: edges){
-                    if(e.notCycleEdge){
-                        point ep1 = e.points[0].subtree();
-                        point ep2 = e.points[1].subtree();
+            while (ei < li && done) {
+                for (edge e: edges) {
+                    if (e.notEdge) {
+                        point p1 = e.points[0].subtree();
+                        point p2 = e.points[1].subtree();
 
-                        if(ep1 == ep2){
-                            e.notCycleEdge = false;
+                        if (p1 == p2) {
+                            e.notEdge = false;
                         }
                     }
                 }
@@ -1043,108 +1026,98 @@ class Surface {
         }
     }
 
-    private static volatile int eIndex = 0; // keep track of partitions
-    private static volatile boolean isFinished = true; // make sure while loop exits when finished
+    static volatile boolean done;
+    static volatile int ei = 0;
+
     public void KruskalSolve() throws Coordinator.KilledException {
         int numTrees = n;
-        int numEdges = getSize(); // number of edges in triangulation
+        int start = 0;
+        int parts = thread_count + 1;
+        int num_edges = edges.size();
+        int terval = 0;
+        MSTHelper[] threads = new MSTHelper[thread_count];
 
-        int partitions = threads_cnt + 1; // pay attention change back
+        int temp = num_edges % parts;
 
-        int e_index = 0; // it is each partition starting index, but it is locally different from eIndex which controls when to exit helper thread
-        boolean fromFlag = true;
-        boolean toFlag = false;
-        int p = 0; // each partition of edges starting index
-        int thread_id = 0;
-        int interval = 0;
-
-        MSTHelperThread[] MSTThread = new MSTHelperThread[partitions-1]; // partitions actually is # of helper threads
-        // working threads are threads_cnt-1, last thread is null
-        if(numEdges%partitions == 0){
-            interval = numEdges/partitions;
-        }
-        else{
-            interval = (numEdges - numEdges%partitions)/partitions;
+        if (temp == 0) {
+            terval = num_edges / parts;
+        } else {
+            terval = (num_edges - temp) / parts;
         }
 
-        edge fromElement = null;
-        edge toElement = null;
+        edge fromNode = null;
+        edge toNode = null;
+        boolean from = false;
+        boolean to = false;
+        int p = 0;
+        int tid = 0;
 
-        for (edge e : edges) {
-            if(e_index%interval == 0 && fromFlag == true){
-                fromElement = e;
-                toFlag = true;
-                fromFlag = false;
-                p = e_index;
+        for (edge e: edges) {
+            if(start % terval == 0 && from == true){
+                fromNode = e;
+                to = true;
+                from = false;
+                p = start;
             }
-            if(e_index == p+interval && toFlag == true){
-                toElement = e;
-                fromFlag = true;
-                toFlag = false;
+            if(start == p + terval && to == true){
+                toNode = e;
+                from = true;
+                to = false;
 
-                SortedSet<edge> h_edges = edges.subSet(fromElement, toElement);
+                SortedSet<edge> hedges = edges.subSet(fromNode, toNode);
 
-                MSTThread[thread_id] = new MSTHelperThread(h_edges, thread_id, partitions);
-                MSTThread[thread_id].start();
-                thread_id++;
-                e_index--;
+                threads[tid] = new MSTHelper(hedges, tid, parts);
+                threads[tid].start();
+                tid++;
+                start--;
             }
 
-            e_index++;
+            start++;
         }
-        isFinished = true;
+
+        done = true;
+
         for (edge e : edges) {
-            if(e.notCycleEdge){
-                point st1 = e.points[0].subtree();
-                point st2 = e.points[1].subtree();
-                if (st1 != st2) {
-                    // This edge joins two previously separate subtrees.
-                    st1.merge(st2);
-                    e.addToMST();
-                    if (--numTrees == 1){
-                        isFinished = false;
-                        break;
-                    }
+            point st1 = e.points[0].subtree();
+            point st2 = e.points[1].subtree();
+            if (st1 != st2) {
+                // This edge joins two previously separate subtrees.
+                st1.merge(st2);
+                e.addToMST();
+                if (--numTrees == 1) {
+                    done = false;
+                    break;
                 }
             }
-            eIndex++;
+            ei++;
         }
     }
 
     // This is a wrapper for the root call to triangulate().
     //
     public void DwyerSolve() throws Coordinator.KilledException {
-        int threads_running = 0;
         triangulate(0, n-1, minx, maxx, miny, maxy, 0);
-    }
-
-    // Constructor
-    //
-    public Surface(int N, long SD, Coordinator C, int threads_cnt) {
-        this.threads_cnt = threads_cnt;
-        n = N;
-        sd = SD;
-        coord = C;
-
-        points = new point[n];
-        edges = new ConcurrentSkipListSet<edge>(new edgeComp());
-        // Supports safe concurrent access by worker and graphics threads,
-        // and as a SortedSet it keeps the edges in order by length.
-        pointHash = new HashSet<point>(n);
-
-        prn = new Random();
-        reset();
     }
 }
 
 // Class Animation is the one really complicated sub-pane of the user interface.
 //
 class Animation extends JPanel {
-    private static final int width = 512;      // canvas dimensions
-    private static final int height = 512;
+    private static final int width = 600;      // canvas dimensions
+    private static final int height = 600;
     private static final int dotsize = 6;
     private static final int border = dotsize;
-    private final Surface s;
+    private final MSTworld w;
+
+    // Constructor
+    //
+    public Animation(MSTworld W) {
+        setPreferredSize(new Dimension(width+border*2, height+border*2));
+        setBackground(Color.white);
+        setForeground(Color.black);
+        w = W;
+        reset();
+    }
 
     // The next two routines figure out where to render the dot
     // for a point, given the size of the animation panel and the spread
@@ -1152,13 +1125,13 @@ class Animation extends JPanel {
     //
     private int xPosition(int x) {
         return (int)
-                (((double)x-(double)s.getMinx())*(double)width
-                        /((double)s.getMaxx()-(double)s.getMinx()))+border;
+                (((double)x - (double)w.getMinx()) * (double)width
+                        / ((double)w.getMaxx() - (double)w.getMinx())) + border;
     }
     private int yPosition(int y) {
         return (int)
-                (((double)s.getMaxy()-(double)y)*(double)height
-                        /((double)s.getMaxy()-(double)s.getMiny()))+border;
+                (((double)w.getMaxy() - (double)y) * (double)height
+                        / ((double)w.getMaxy() - (double)w.getMiny())) + border;
     }
 
     // The following method is called automatically by the graphics
@@ -1171,7 +1144,7 @@ class Animation extends JPanel {
         final Graphics2D g2 = (Graphics2D) g;
 
         super.paintComponent(g);    // clears panel
-        s.forAllEdges(new Surface.EdgeRoutine() {
+        w.forAllEdges(new MSTworld.EdgeRoutine() {
             public void run(int x1, int y1, int x2, int y2, boolean bold) {
                 if (bold) {
                     g2.setPaint(Color.red);
@@ -1184,7 +1157,7 @@ class Animation extends JPanel {
                         xPosition(x2), yPosition(y2));
             }
         });
-        s.forAllPoints(new Surface.PointRoutine() {
+        w.forAllPoints(new MSTworld.PointRoutine() {
             public void run(int x, int y) {
                 g2.setPaint(Color.blue);
                 g.fillOval(xPosition(x)-dotsize/2, yPosition(y)-dotsize/2,
@@ -1198,19 +1171,9 @@ class Animation extends JPanel {
     public void reset() {
         repaint();      // Tell graphics system to re-render.
     }
-
-    // Constructor
-    //
-    public Animation(Surface S) {
-        setPreferredSize(new Dimension(width+border*2, height+border*2));
-        setBackground(Color.white);
-        setForeground(Color.black);
-        s = S;
-        reset();
-    }
 }
 
-// Class UI is the user interface.  It displays a Surface canvas above
+// Class UI is the user interface.  It displays an MSTworld canvas above
 // a row of buttons and a row of statistics.  Actions (event handlers)
 // are defined for each of the buttons.  Depending on the state of the
 // UI, either the "run" or the "pause" button is the default (highlighted in
@@ -1218,7 +1181,7 @@ class Animation extends JPanel {
 //
 class UI extends JPanel {
     private final Coordinator coordinator;
-    private final Surface surface;
+    private final MSTworld world;
     private final Animation animation;
 
     private final JRootPane root;
@@ -1234,27 +1197,20 @@ class UI extends JPanel {
 
     private final JLabel time = new JLabel("time: 0");
 
-    public void updateTime() {
-        Date d = new Date();
-        elapsedTime += (d.getTime() - startTime);
-        time.setText(String.format("time: %d.%03d", elapsedTime/1000,
-                elapsedTime%1000));
-    }
-
     // Constructor
     //
-    public UI(Coordinator C, Surface S,
+    public UI(Coordinator C, MSTworld W,
               Animation A, long SD, RootPaneContainer pane) {
         final UI ui = this;
         coordinator = C;
-        surface = S;
+        world = W;
         animation = A;
 
         final JPanel buttons = new JPanel();   // button panel
         final JButton runButton = new JButton("Run");
         final JButton pauseButton = new JButton("Pause");
-        final JButton resetButton = new JButton("Reset");
         final JButton randomizeButton = new JButton("Randomize");
+        final JButton resetButton = new JButton("Reset");
         final JButton quitButton = new JButton("Quit");
 
         final JPanel stats = new JPanel();   // statistics panel
@@ -1266,7 +1222,7 @@ class UI extends JPanel {
                 if (state == stopped) {
                     state = running;
                     root.setDefaultButton(pauseButton);
-                    Worker w = new Worker(surface, coordinator,
+                    Worker w = new Worker(world, coordinator,
                             ui, animation);
                     Date d = new Date();
                     startTime = d.getTime();
@@ -1290,25 +1246,25 @@ class UI extends JPanel {
                 }
             }
         });
-        resetButton.addActionListener(new ActionListener() {
-            public void actionPerformed(ActionEvent e) {
-                state = stopped;
-                coordinator.stop();
-                root.setDefaultButton(runButton);
-                surface.reset();
-                animation.reset();
-                elapsedTime = 0;
-                time.setText("time: 0");
-            }
-        });
         randomizeButton.addActionListener(new ActionListener() {
             public void actionPerformed(ActionEvent e) {
                 state = stopped;
                 coordinator.stop();
                 root.setDefaultButton(runButton);
-                long v = surface.randomize();
+                long v = world.randomize();
                 animation.reset();
                 seed.setText("seed: " + v + "   ");
+                elapsedTime = 0;
+                time.setText("time: 0");
+            }
+        });
+        resetButton.addActionListener(new ActionListener() {
+            public void actionPerformed(ActionEvent e) {
+                state = stopped;
+                coordinator.stop();
+                root.setDefaultButton(runButton);
+                world.reset();
+                animation.reset();
                 elapsedTime = 0;
                 time.setText("time: 0");
             }
@@ -1323,15 +1279,15 @@ class UI extends JPanel {
         buttons.setLayout(new FlowLayout());
         buttons.add(runButton);
         buttons.add(pauseButton);
-        buttons.add(resetButton);
         buttons.add(randomizeButton);
+        buttons.add(resetButton);
         buttons.add(quitButton);
 
         // put the labels into the statistics panel:
         stats.add(seed);
         stats.add(time);
 
-        // put the Surface canvas, the button panel, and the stats
+        // put the MSTworld canvas, the button panel, and the stats
         // label into the UI:
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
         setBorder(BorderFactory.createEmptyBorder(externalBorder,
@@ -1344,5 +1300,12 @@ class UI extends JPanel {
         pane.getContentPane().add(this);
         root = getRootPane();
         root.setDefaultButton(runButton);
+    }
+
+    public void updateTime() {
+        Date d = new Date();
+        elapsedTime += (d.getTime() - startTime);
+        time.setText(String.format("time: %d.%03d",
+                elapsedTime/1000, elapsedTime%1000));
     }
 }
